@@ -92,18 +92,6 @@ def to_float(value: Any, default: Optional[float] = None) -> Optional[float]:
 
 
 def extract_from_config_yaml(config: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    User-facing YAML should mainly define params.
-    Supported shapes:
-      params:
-        target: 8.8.8.8
-
-    or:
-      docker:
-        execute:
-          params:
-            target: 8.8.8.8
-    """
     params = config.get("params")
     if isinstance(params, dict):
         return params
@@ -120,11 +108,6 @@ def extract_from_config_yaml(config: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def load_runtime_inputs() -> Dict[str, Any]:
-    """
-    LEOScope contract for this measurement image:
-    - metadata comes from experiment-args.json
-    - measurement params come from experiment-config.yaml only
-    """
     metadata: Dict[str, Any] = {
         "experiment_id": "unknown",
         "node_id": "unknown",
