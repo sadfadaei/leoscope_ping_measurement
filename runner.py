@@ -17,6 +17,7 @@ RESULTS_DIR = ARTIFACTS_DIR / "execution_results"
 ARGS_FILE = ARTIFACTS_DIR / "experiment-args.json"
 CONFIG_FILE = ARTIFACTS_DIR / "experiment-config.yaml"
 
+LOG_FILE = RESULTS_DIR / "container.log"
 RAW_OUT = RESULTS_DIR / "ping.raw.txt"
 STDERR_OUT = RESULTS_DIR / "ping.stderr.txt"
 COMMAND_OUT = RESULTS_DIR / "ping.command.txt"
@@ -29,12 +30,22 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
-def log(message: str) -> None:
-    print(f"[LEOSCOPE][INFO] {utc_now_iso()} - {message}", flush=True)
+def write_log_line(line: str):
+    LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with LOG_FILE.open("a", encoding="utf-8") as f:
+        f.write(line + "\n")
 
 
-def log_error(message: str) -> None:
-    print(f"[LEOSCOPE][ERROR] {utc_now_iso()} - {message}", file=sys.stderr, flush=True)
+def log(message: str):
+    line = f"[LEOSCOPE][INFO] {utc_now_iso()} - {message}"
+    print(line, flush=True)
+    write_log_line(line)
+
+
+def log_error(message: str):
+    line = f"[LEOSCOPE][ERROR] {utc_now_iso()} - {message}"
+    print(line, file=sys.stderr, flush=True)
+    write_log_line(line)
 
 
 def write_text(path: Path, content: str) -> None:
@@ -110,14 +121,9 @@ def extract_from_config_yaml(config: Dict[str, Any]) -> Dict[str, Any]:
 
 def load_runtime_inputs() -> Dict[str, Any]:
     """
-    Preferred input:
-      /artifacts/experiment-args.json
-
-    Fallback:
-      /artifacts/experiment-config.yaml
-
-    Metadata must come from experiment-args.json only.
-    Params come from experiment-args.json first; if missing, fall back to YAML.
+    LEOScope contract for this measurement image:
+    - metadata comes from experiment-args.json
+    - measurement params come from experiment-config.yaml only
     """
     metadata: Dict[str, Any] = {
         "experiment_id": "unknown",
@@ -143,11 +149,7 @@ def load_runtime_inputs() -> Dict[str, Any]:
             "end_date": args.get("endDate", ""),
         }
 
-        args_params = args.get("params", {})
-        if isinstance(args_params, dict):
-            params.update(args_params)
-
-    if not params and yaml_exists:
+    if yaml_exists:
         config = load_yaml(CONFIG_FILE)
         yaml_params = extract_from_config_yaml(config)
         if isinstance(yaml_params, dict):
@@ -159,10 +161,10 @@ def load_runtime_inputs() -> Dict[str, Any]:
         "input_sources": {
             "experiment_args_json_exists": args_exists,
             "experiment_config_yaml_exists": yaml_exists,
-            "params_source": "experiment-args.json" if args_exists and params else ("experiment-config.yaml" if yaml_exists else "none"),
+            "params_source": "experiment-config.yaml" if params else "defaults",
+            "metadata_source": "experiment-args.json" if args_exists else "defaults",
         },
     }
-
 
 def validate_params(params: Dict[str, Any]) -> Dict[str, Any]:
     validated = {
@@ -328,6 +330,9 @@ def main() -> int:
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
     log("Starting ping measurement")
+    
+    if LOG_FILE.exists():
+        LOG_FILE.unlink()
 
     try:
         runtime = load_runtime_inputs()
