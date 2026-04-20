@@ -4,6 +4,7 @@ import re
 import shlex
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -11,15 +12,40 @@ import yaml
 
 
 ARTIFACTS_DIR = Path("/artifacts")
+RESULTS_DIR = ARTIFACTS_DIR / "execution_results"
+
 ARGS_FILE = ARTIFACTS_DIR / "experiment-args.json"
 CONFIG_FILE = ARTIFACTS_DIR / "experiment-config.yaml"
 
-RAW_OUT = ARTIFACTS_DIR / "ping.raw.txt"
-STDERR_OUT = ARTIFACTS_DIR / "ping.stderr.txt"
-COMMAND_OUT = ARTIFACTS_DIR / "ping.command.txt"
-RESULT_JSON = ARTIFACTS_DIR / "ping.result.json"
-RESULT_CSV = ARTIFACTS_DIR / "ping.result.csv"
-METADATA_JSON = ARTIFACTS_DIR / "ping.metadata.json"
+RAW_OUT = RESULTS_DIR / "ping.raw.txt"
+STDERR_OUT = RESULTS_DIR / "ping.stderr.txt"
+COMMAND_OUT = RESULTS_DIR / "ping.command.txt"
+RESULT_JSON = RESULTS_DIR / "ping.result.json"
+RESULT_CSV = RESULTS_DIR / "ping.result.csv"
+METADATA_JSON = RESULTS_DIR / "ping.metadata.json"
+
+
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def log(message: str) -> None:
+    print(f"[LEOSCOPE][INFO] {utc_now_iso()} - {message}", flush=True)
+
+
+def log_error(message: str) -> None:
+    print(f"[LEOSCOPE][ERROR] {utc_now_iso()} - {message}", file=sys.stderr, flush=True)
+
+
+def write_text(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+
+
+def write_json(path: Path, data: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
 
 
 def load_json(path: Path) -> Dict[str, Any]:
@@ -56,19 +82,16 @@ def to_float(value: Any, default: Optional[float] = None) -> Optional[float]:
 
 def extract_from_config_yaml(config: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Flexible fallback parser for experiment-config.yaml.
-
-    Recommended convention:
+    User-facing YAML should mainly define params.
+    Supported shapes:
       params:
         target: 8.8.8.8
-        count: 4
-        ...
 
-    Also supports:
+    or:
       docker:
         execute:
           params:
-            ...
+            target: 8.8.8.8
     """
     params = config.get("params")
     if isinstance(params, dict):
@@ -87,8 +110,14 @@ def extract_from_config_yaml(config: Dict[str, Any]) -> Dict[str, Any]:
 
 def load_runtime_inputs() -> Dict[str, Any]:
     """
-    Prefer experiment-args.json because it is LEOScope-normalized.
-    Fall back to experiment-config.yaml because that is the user-facing file.
+    Preferred input:
+      /artifacts/experiment-args.json
+
+    Fallback:
+      /artifacts/experiment-config.yaml
+
+    Metadata must come from experiment-args.json only.
+    Params come from experiment-args.json first; if missing, fall back to YAML.
     """
     metadata: Dict[str, Any] = {
         "experiment_id": "unknown",
@@ -100,45 +129,38 @@ def load_runtime_inputs() -> Dict[str, Any]:
     }
     params: Dict[str, Any] = {}
 
-    if ARGS_FILE.exists():
+    args_exists = ARGS_FILE.exists()
+    yaml_exists = CONFIG_FILE.exists()
+
+    if args_exists:
         args = load_json(ARGS_FILE)
-        metadata.update(
-            {
-                "experiment_id": args.get("id", "unknown"),
-                "node_id": args.get("nodeid", "unknown"),
-                "user_id": args.get("userid", "unknown"),
-                "experiment_type": args.get("type", "unknown"),
-                "start_date": args.get("startDate", ""),
-                "end_date": args.get("endDate", ""),
-            }
-        )
+        metadata = {
+            "experiment_id": args.get("id", "unknown"),
+            "node_id": args.get("nodeid", "unknown"),
+            "user_id": args.get("userid", "unknown"),
+            "experiment_type": args.get("type", "unknown"),
+            "start_date": args.get("startDate", ""),
+            "end_date": args.get("endDate", ""),
+        }
+
         args_params = args.get("params", {})
         if isinstance(args_params, dict):
             params.update(args_params)
 
-    if CONFIG_FILE.exists():
+    if not params and yaml_exists:
         config = load_yaml(CONFIG_FILE)
-
-        if metadata["experiment_id"] == "unknown":
-            metadata["experiment_id"] = config.get("id", "unknown")
-        if metadata["node_id"] == "unknown":
-            metadata["node_id"] = config.get("nodeid", "unknown")
-        if metadata["user_id"] == "unknown":
-            metadata["user_id"] = config.get("userid", "unknown")
-        if metadata["experiment_type"] == "unknown":
-            metadata["experiment_type"] = config.get("type", "unknown")
-        if not metadata["start_date"]:
-            metadata["start_date"] = config.get("startDate", "")
-        if not metadata["end_date"]:
-            metadata["end_date"] = config.get("endDate", "")
-
         yaml_params = extract_from_config_yaml(config)
-        for key, value in yaml_params.items():
-            params.setdefault(key, value)
+        if isinstance(yaml_params, dict):
+            params.update(yaml_params)
 
     return {
         "metadata": metadata,
         "params": params,
+        "input_sources": {
+            "experiment_args_json_exists": args_exists,
+            "experiment_config_yaml_exists": yaml_exists,
+            "params_source": "experiment-args.json" if args_exists and params else ("experiment-config.yaml" if yaml_exists else "none"),
+        },
     }
 
 
@@ -247,15 +269,6 @@ def parse_ping_output(raw_text: str) -> Dict[str, Optional[float]]:
     return result
 
 
-def write_text(path: Path, content: str) -> None:
-    path.write_text(content, encoding="utf-8")
-
-
-def write_json(path: Path, data: Dict[str, Any]) -> None:
-    with path.open("w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
-
-
 def write_csv(path: Path, row: Dict[str, Any]) -> None:
     fieldnames = [
         "measurement",
@@ -278,22 +291,61 @@ def write_csv(path: Path, row: Dict[str, Any]) -> None:
         "rtt_mdev_ms",
         "command",
     ]
+    path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerow({k: row.get(k) for k in fieldnames})
 
 
+def build_failure_result(error_message: str) -> Dict[str, Any]:
+    return {
+        "measurement": "ping",
+        "experiment_id": "unknown",
+        "node_id": "unknown",
+        "user_id": "unknown",
+        "experiment_type": "unknown",
+        "start_date": "",
+        "end_date": "",
+        "target": "",
+        "exit_code": 1,
+        "success": False,
+        "packets_transmitted": None,
+        "packets_received": None,
+        "packet_loss_percent": None,
+        "total_time_ms": None,
+        "rtt_min_ms": None,
+        "rtt_avg_ms": None,
+        "rtt_max_ms": None,
+        "rtt_mdev_ms": None,
+        "command": "",
+        "error": error_message,
+    }
+
+
 def main() -> int:
     ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+
+    log("Starting ping measurement")
 
     try:
         runtime = load_runtime_inputs()
         metadata = runtime["metadata"]
         params = validate_params(runtime["params"])
+        input_sources = runtime["input_sources"]
+
+        log(f"Using experiment-args.json: {input_sources['experiment_args_json_exists']}")
+        log(f"Using experiment-config.yaml: {input_sources['experiment_config_yaml_exists']}")
+        log(f"Resolved params source: {input_sources['params_source']}")
+
+        log(f"Target: {params['target']}")
+        log(f"Count: {params['count']}, Interval: {params['interval']}")
+
         cmd = build_ping_command(params)
         command_str = " ".join(shlex.quote(part) for part in cmd)
 
+        log(f"Executing command: {command_str}")
         write_text(COMMAND_OUT, command_str + "\n")
 
         metadata_json = {
@@ -301,10 +353,8 @@ def main() -> int:
             **metadata,
             "params": params,
             "command": command_str,
-            "input_sources": {
-                "experiment_args_json_exists": ARGS_FILE.exists(),
-                "experiment_config_yaml_exists": CONFIG_FILE.exists(),
-            },
+            "input_sources": input_sources,
+            "results_directory": str(RESULTS_DIR),
         }
         write_json(METADATA_JSON, metadata_json)
 
@@ -321,7 +371,10 @@ def main() -> int:
         write_text(RAW_OUT, raw_stdout)
         write_text(STDERR_OUT, raw_stderr)
 
+        log(f"Execution finished with exit code: {completed.returncode}")
+
         parsed = parse_ping_output(raw_stdout)
+        log("Parsing ping output completed")
 
         result = {
             "measurement": "ping",
@@ -336,36 +389,25 @@ def main() -> int:
         write_json(RESULT_JSON, result)
         write_csv(RESULT_CSV, result)
 
+        log(f"Results written to: {RESULTS_DIR}")
+
+        if completed.returncode == 0:
+            log("Measurement completed successfully")
+        else:
+            log_error("Measurement failed")
+
         return completed.returncode
 
     except Exception as exc:
-        error_text = f"{type(exc).__name__}: {exc}\n"
-        write_text(STDERR_OUT, error_text)
+        error_text = f"{type(exc).__name__}: {exc}"
+        log_error(error_text)
 
-        failure_result = {
-            "measurement": "ping",
-            "experiment_id": "unknown",
-            "node_id": "unknown",
-            "user_id": "unknown",
-            "experiment_type": "unknown",
-            "start_date": "",
-            "end_date": "",
-            "target": "",
-            "exit_code": 1,
-            "success": False,
-            "packets_transmitted": None,
-            "packets_received": None,
-            "packet_loss_percent": None,
-            "total_time_ms": None,
-            "rtt_min_ms": None,
-            "rtt_avg_ms": None,
-            "rtt_max_ms": None,
-            "rtt_mdev_ms": None,
-            "command": "",
-            "error": str(exc),
-        }
+        write_text(STDERR_OUT, error_text + "\n")
+
+        failure_result = build_failure_result(str(exc))
         write_json(RESULT_JSON, failure_result)
         write_csv(RESULT_CSV, failure_result)
+
         return 1
 
 
